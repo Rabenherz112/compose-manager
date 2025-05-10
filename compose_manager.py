@@ -328,9 +328,12 @@ def add_service(ctx, app_name):
         ).ask() or []
         attach = [a.replace('(E) ', '') for a in attach]
         for net in attach:
-            props = {'name': net, 'type': 'bridge'}
+            props = {'name': net}
             if net in infra_nets:
+                # external networks must not have a `type:` field
                 props['external'] = True
+            else:
+                props['type'] = 'bridge'
             nets_cfg[net] = CommentedMap(props)
             cfg.setdefault('networks', CommentedSeq()).append(net)
 
@@ -347,10 +350,17 @@ def add_service(ctx, app_name):
                     'internet – IPv6-enabled bridged network'
                 ]
             ).ask().split()[0]
-            props = {'name': nn, 'type': 'bridge'}
-            if kind == 'external': props['external'] = True
-            elif kind == 'internal': props['internal'] = True
-            else: props['enable_ipv6'] = True
+            props = {'name': nn}
+            if kind == 'external':
+                # external networks must not have a `type:` field
+                props['external'] = True
+            else:
+                props['type'] = 'bridge'
+                if kind == 'internal':
+                    props['internal'] = True
+                else:
+                    # "internet" choice
+                    props['enable_ipv6'] = True
             nets_cfg[nn] = CommentedMap(props)
             cfg.setdefault('networks', CommentedSeq()).append(nn)
 
