@@ -251,6 +251,8 @@ def configure_settings(ctx):
     # Save and report
     save_config({'infra_file': infra, 'presets': presets})
     env_console.print(f"[green]Settings saved to {CONFIG_PATH}[/]")
+    ctx.obj['infra_file'] = infra
+    ctx.obj['presets'] = presets
 
 @cli.command('add')
 @click.argument('app_name')
