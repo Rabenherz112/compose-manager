@@ -465,12 +465,12 @@ def add_service(ctx, app_name):
     # Validation step
     env_console.rule('[bold]Validation[/]')
     try:
-        subprocess.run(['docker-compose','-f',target,'config'], check=True, capture_output=True, text=True)
+        subprocess.run(['docker','compose','-f',target,'config'], check=True, capture_output=True, text=True)
         env_console.print('[green]Compose file is valid![/]')
     except subprocess.CalledProcessError as e:
         env_console.print(f"[red]Validation error:[/] {e.stderr}")
     except FileNotFoundError:
-        env_console.print('[red]docker-compose not found on PATH[/]')
+        env_console.print('[red]docker compose not found on PATH[/]')
 
     env_console.print(f"[bold green]Wrote compose to:[/] {target}")
 
