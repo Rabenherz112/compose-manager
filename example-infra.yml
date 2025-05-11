@@ -1,0 +1,64 @@
+services:
+    nginx:
+        container_name: nginx
+        image: lscr.io/linuxserver/nginx:latest
+        restart: always
+        networks:
+            - internet
+            - reverse-proxy
+        ports:
+            - 80:80
+            - 443:443
+        environment:
+            - PUID=1000
+            - PGID=1000
+            - TZ=Europe/Berlin
+            - DOCKER_MODS=linuxserver/mods:swag-auto-reload|linuxserver/mods:nginx-proxy-confs
+        volumes:
+            - ./nginx-config:/config
+        labels:
+            - "com.centurylinklabs.watchtower.enable=true"
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 1024M
+                reservations:
+                    cpus: '0.25'
+                    memory: 128M
+    watchtower:
+        container_name: watchtower
+        image: containrrr/watchtower
+        restart: unless-stopped
+        networks:
+            - internet
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+        environment:
+            - PUID=1000
+            - PGID=1000
+            - TZ=Europe/Berlin
+            - WATCHTOWER_CLEANUP=true
+            - WATCHTOWER_INCLUDE_RESTARTING=true
+            - WATCHTOWER_INCLUDE_STOPPED=true
+            - WATCHTOWER_LABEL_ENABLE=true
+            - WATCHTOWER_NO_STARTUP_MESSAGE=true
+            - WATCHTOWER_SCHEDULE=0 0 * * 6
+            - WATCHTOWER_ROLLING_RESTART=true
+            - WATCHTOWER_TIMEOUT=30s
+        labels:
+            - "com.centurylinklabs.watchtower.enable=false"
+        deploy:
+            resources:
+                limits:
+                    cpus: '0.2'
+                    memory: 64M
+networks:
+    internet:
+        name: internet
+        driver: bridge
+        enable_ipv6: true
+    reverse-proxy:
+        name: reverse-proxy
+        driver: bridge
+        internal: true
