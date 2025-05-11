@@ -18,7 +18,13 @@ from rich.console import Console
 from rich.table import Table
 import questionary
 from io import StringIO
+from io import BytesIO
 import re
+import zipfile
+import requests
+
+__version__ = "0.2.0"
+GITHUB_REPO = "Rabenherz112/compose-manager"
 
 # Initialize the rich console for logging
 env_console = Console()
@@ -37,7 +43,6 @@ DEFAULT_PRESETS = {
 # Path to store user configuration
 CONFIG_PATH = os.path.expanduser('~/.compose_manager_config.yml')
 
-
 def load_config():
     """
     Load user configuration from CONFIG_PATH (infra file path and presets).
@@ -48,14 +53,12 @@ def load_config():
             return safe_yaml.safe_load(f) or {}
     return {}
 
-
 def save_config(cfg):
     """
     Persist the given config dict to CONFIG_PATH.
     """
     with open(CONFIG_PATH, 'w') as f:
         safe_yaml.safe_dump(cfg, f)
-
 
 def init_infra(path):
     """
@@ -67,7 +70,6 @@ def init_infra(path):
     with open(path, 'w') as f:
         yaml.dump(root, f)
     env_console.log(f"[green]Initialized infrastructure file:[/] {path}")
-
 
 def order_service(cfg: CommentedMap) -> CommentedMap:
     """
@@ -88,7 +90,6 @@ def order_service(cfg: CommentedMap) -> CommentedMap:
         ordered[key] = val
     return ordered
 
-
 def order_network(net_cfg: CommentedMap) -> CommentedMap:
     """
     Reorder a network mapping with keys: name, type, internal, external, enable_ipv6
@@ -102,6 +103,55 @@ def order_network(net_cfg: CommentedMap) -> CommentedMap:
     for key, val in net_cfg.items():
         ordered[key] = val
     return ordered
+
+def get_latest_release():
+    """Return (tag_name, zipball_url) of the latest GitHub release."""
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    r = requests.get(api, timeout=5)
+    r.raise_for_status()
+    j = r.json()
+    return j["tag_name"], j["zipball_url"]
+
+def download_and_extract(zip_url, target_dir):
+    """Download the repo zipball and extract only relevant files."""
+    r = requests.get(zip_url, timeout=10)
+    r.raise_for_status()
+    z = zipfile.ZipFile(BytesIO(r.content))
+
+    wanted = {'compose_manager.py', 'setup_env.py'}
+
+    prefix = z.namelist()[0]
+    for member in z.infolist():
+        relpath = os.path.relpath(member.filename, prefix)
+        if member.is_dir() or relpath not in wanted:
+            continue
+
+        dest = os.path.join(target_dir, relpath)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with z.open(member) as src, open(dest, "wb") as out:
+            out.write(src.read())
+        print(f"  ↳ updated {relpath}")
+
+def self_update():
+    try:
+        latest_tag, zip_url = get_latest_release()
+    except Exception as e:
+        print(f"[update] failed to fetch latest release: {e}", file=sys.stderr)
+        return False
+
+    if latest_tag <= __version__:
+        return False
+
+    print(f"Updating compose-manager: {__version__} → {latest_tag}…")
+    repo_dir = os.path.abspath(os.path.dirname(__file__))
+    download_and_extract(zip_url, repo_dir)
+
+    setup = os.path.join(repo_dir, "setup_env.py")
+    if os.path.isfile(setup):
+        subprocess.run([sys.executable, setup, '--quiet'], check=True)
+
+    print("Update complete; now re-launching with the new code.")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @click.group(invoke_without_command=True)
 @click.option(
@@ -122,7 +172,6 @@ def cli(ctx, infra_file):
     }
     if ctx.invoked_subcommand is None:
         main_menu(ctx)
-
 
 def main_menu(ctx):
     """
@@ -150,10 +199,10 @@ def main_menu(ctx):
         elif choice.startswith('🛠️'):
             app = questionary.text('Application folder name:').ask()
             ctx.invoke(build,
-                       app_name=app,
-                       service=[], restart='unless-stopped',
-                       network=[], port=[], env=[],
-                       preset='None', volume=[]
+                        app_name=app,
+                        service=[], restart='unless-stopped',
+                        network=[], port=[], env=[],
+                        preset='None', volume=[]
             )
         elif choice.startswith('⚙️'):
             configure_settings(ctx)
@@ -162,7 +211,6 @@ def main_menu(ctx):
             ctx.invoke(list_services, app_name=app)
         else:
             sys.exit(0)
-
 
 def configure_settings(ctx):
     """
@@ -464,21 +512,21 @@ def list_services(ctx, app_name):
 
 @cli.command('build')
 @click.option('--app','app_name',required=True,
-              help='Application folder to generate compose.yml')
+                help='Application folder to generate compose.yml')
 @click.option('--service','-s',multiple=True,
-              help='Specify services as container_name:image entries')
+                help='Specify services as container_name:image entries')
 @click.option('--restart',default='unless-stopped',
-              help='Restart policy for all generated services')
+                help='Restart policy for all generated services')
 @click.option('--network','-n',multiple=True,
-              help='Attach these networks to all services')
+                help='Attach these networks to all services')
 @click.option('--port','-p',multiple=True,
-              help='Publish these ports on all services (host:container)')
+                help='Publish these ports on all services (host:container)')
 @click.option('--env','-e',multiple=True,
-              help='Set environment variables for all services (KEY=VALUE)')
+                help='Set environment variables for all services (KEY=VALUE)')
 @click.option('--preset','-r',default='None',
-              help='Resource preset to apply to all services')
+                help='Resource preset to apply to all services')
 @click.option('--volume','-v',multiple=True,
-              help='Bind mount these volumes on all services')
+                help='Bind mount these volumes on all services')
 @click.pass_context
 def build(ctx, app_name, service, restart, network, port, env, preset, volume):
     """
@@ -529,5 +577,18 @@ def build(ctx, app_name, service, restart, network, port, env, preset, volume):
         ]), f)
     env_console.print(f"[green]Built compose file at:[/] {target}")
 
+@cli.command()
+def update():
+    """Manually pull down and install the latest compose-manager from GitHub."""
+    if not self_update():
+        click.echo("Already up to date.")
+
 if __name__=='__main__':
+    try:
+        if self_update():
+            # os.execv above will replace this process, so we only get here on failure
+            sys.exit(1)
+    except Exception as e:
+        print(f"[update] failed: {e}", file=sys.stderr)
+    # Run the CLI
     cli()
