@@ -23,7 +23,7 @@ import re
 import zipfile
 import requests
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 GITHUB_REPO = "Rabenherz112/compose-manager"
 
 # Initialize the rich console for logging
