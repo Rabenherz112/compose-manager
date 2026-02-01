@@ -14,6 +14,7 @@ import click
 import yaml as safe_yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from rich.console import Console
 from rich.table import Table
 import questionary
@@ -42,6 +43,17 @@ DEFAULT_PRESETS = {
 
 # Path to store user configuration
 CONFIG_PATH = os.path.expanduser('~/.compose_manager_config.yml')
+
+def ask_or_abort(result):
+    """Guard against None returns from questionary (Ctrl+C / Ctrl+D)."""
+    if result is None:
+        env_console.print("\n[red]Aborted by user[/]")
+        sys.exit(0)
+    return result
+
+def parse_version(tag):
+    """Parse a version string like 'v0.2.1' or '0.2.1' into a comparable tuple."""
+    return tuple(int(x) for x in tag.lstrip('v').split('.'))
 
 def load_config():
     """
@@ -92,10 +104,10 @@ def order_service(cfg: CommentedMap) -> CommentedMap:
 
 def order_network(net_cfg: CommentedMap) -> CommentedMap:
     """
-    Reorder a network mapping with keys: name, type, internal, external, enable_ipv6
+    Reorder a network mapping with keys: name, driver, internal, external, enable_ipv6
     Extra properties follow.
     """
-    key_order = ['name', 'type', 'internal', 'external', 'enable_ipv6']
+    key_order = ['name', 'driver', 'internal', 'external', 'enable_ipv6']
     ordered = CommentedMap()
     for key in key_order:
         if key in net_cfg:
@@ -103,6 +115,24 @@ def order_network(net_cfg: CommentedMap) -> CommentedMap:
     for key, val in net_cfg.items():
         ordered[key] = val
     return ordered
+
+def validate_compose(target):
+    """Run docker compose config to validate a compose file."""
+    env_console.rule('[bold]Validation[/]')
+    try:
+        subprocess.run(
+            ['docker', 'compose', '-f', target, 'config'],
+            check=True, capture_output=True, text=True
+        )
+        env_console.print('[green]Compose file is valid![/]')
+    except subprocess.CalledProcessError as e:
+        env_console.print(f"[red]Validation error:[/] {e.stderr}")
+    except FileNotFoundError:
+        env_console.print('[red]docker compose not found on PATH[/]')
+
+def quote_ports(ports):
+    """Wrap port mapping strings in YAML double-quotes to prevent misinterpretation."""
+    return CommentedSeq([DoubleQuotedScalarString(p) for p in ports])
 
 def get_latest_release():
     """Return (tag_name, zipball_url) of the latest GitHub release."""
@@ -139,7 +169,7 @@ def self_update():
         print(f"[update] failed to fetch latest release: {e}", file=sys.stderr)
         return False
 
-    if latest_tag <= __version__:
+    if parse_version(latest_tag) <= parse_version(__version__):
         return False
 
     print(f"Updating compose-manager: {__version__} → {latest_tag}…")
@@ -154,6 +184,7 @@ def self_update():
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @click.group(invoke_without_command=True)
+@click.version_option(version=__version__, prog_name='compose-manager')
 @click.option(
     '--infra-file', '-F',
     default=lambda: load_config().get('infra_file', 'infra.yml'),
@@ -179,36 +210,41 @@ def main_menu(ctx):
     """
     while True:
         try:
-            choice = questionary.select(
+            choice = ask_or_abort(questionary.select(
                 'Main Menu - select action:',
                 choices=[
                     '🆕 Wizard: interactive service editor',
                     '🛠️ Script: build via command-line args',
                     '⚙️ Settings: configure defaults',
                     '📄 List: show existing services',
+                    '🗑️ Remove: delete a service',
                     '❌ Exit'
                 ]
-            ).ask()
+            ).ask())
         except KeyboardInterrupt:
             env_console.print("\n[red]Aborted by user[/]")
             sys.exit(0)
 
         if choice.startswith('🆕'):
-            app = questionary.text('Application folder name:').ask()
+            app = ask_or_abort(questionary.text('Application folder name:').ask())
             ctx.invoke(add_service, app_name=app)
         elif choice.startswith('🛠️'):
-            app = questionary.text('Application folder name:').ask()
+            app = ask_or_abort(questionary.text('Application folder name:').ask())
             ctx.invoke(build,
                         app_name=app,
                         service=[], restart='unless-stopped',
                         network=[], port=[], env=[],
-                        preset='None', volume=[]
+                        preset='None', volume=[],
+                        cpus=None, memory=None
             )
         elif choice.startswith('⚙️'):
             configure_settings(ctx)
         elif choice.startswith('📄'):
-            app = questionary.text('Application folder to list:').ask()
+            app = ask_or_abort(questionary.text('Application folder to list:').ask())
             ctx.invoke(list_services, app_name=app)
+        elif choice.startswith('🗑️'):
+            app = ask_or_abort(questionary.text('Application folder:').ask())
+            ctx.invoke(remove_service, app_name=app)
         else:
             sys.exit(0)
 
@@ -219,33 +255,33 @@ def configure_settings(ctx):
     """
     cfg = load_config()
     env_console.rule('[bold]Configure Defaults[/]')
-    infra = questionary.text(
+    infra = ask_or_abort(questionary.text(
         'Infra compose file path:',
         default=cfg.get('infra_file', 'infra.yml')
-    ).ask()
+    ).ask())
 
     presets = cfg.get('presets', DEFAULT_PRESETS)
     table = Table('Preset','CPUs','Memory')
     for name, (cpu, mem) in presets.items(): table.add_row(name, cpu, mem)
     env_console.print(table)
 
-    if questionary.confirm('Reset all presets to default?').ask():
+    if ask_or_abort(questionary.confirm('Reset all presets to default?').ask()):
         presets = DEFAULT_PRESETS
-    elif questionary.confirm('Edit existing presets?').ask():
+    elif ask_or_abort(questionary.confirm('Edit existing presets?').ask()):
         for name in list(presets):
-            cpu = questionary.text(
+            cpu = ask_or_abort(questionary.text(
                 f"CPU count for '{name}':",
                 default=presets[name][0]
-            ).ask()
-            mem = questionary.text(
+            ).ask())
+            mem = ask_or_abort(questionary.text(
                 f"Memory limit for '{name}':",
                 default=presets[name][1]
-            ).ask()
+            ).ask())
             presets[name] = (cpu, mem)
-        if questionary.confirm('Add a new preset?').ask():
-            new = questionary.text('Preset name:').ask()
-            cpu = questionary.text('CPUs:').ask()
-            mem = questionary.text('Memory (e.g. 256M):').ask()
+        if ask_or_abort(questionary.confirm('Add a new preset?').ask()):
+            new = ask_or_abort(questionary.text('Preset name:').ask())
+            cpu = ask_or_abort(questionary.text('CPUs:').ask())
+            mem = ask_or_abort(questionary.text('Memory (e.g. 256M):').ask())
             presets[new] = (cpu, mem)
 
     # Save and report
@@ -266,14 +302,15 @@ def add_service(ctx, app_name):
     infra = ctx.obj['infra_file']
     # Ensure infra compose exists
     if not os.path.exists(infra):
-        if questionary.confirm(f"Infra file '{infra}' missing. Create it?").ask():
+        if ask_or_abort(questionary.confirm(f"Infra file '{infra}' missing. Create it?").ask()):
             init_infra(infra)
         else:
             env_console.print('[red]Infra compose file is required.[/]')
             sys.exit(1)
 
     # Load existing infra networks
-    infra_cfg = yaml.load(open(infra)) or {}
+    with open(infra) as _f:
+        infra_cfg = yaml.load(_f) or {}
     infra_nets = list(infra_cfg.get('networks', {}).keys())
 
     # Prepare application directory and compose file
@@ -281,38 +318,40 @@ def add_service(ctx, app_name):
     os.makedirs(app_dir, exist_ok=True)
     target = os.path.join(app_dir, 'compose.yml')
     if not os.path.exists(target):
-        yaml.dump(CommentedMap({'services': CommentedMap(), 'networks': CommentedMap()}), open(target, 'w'))
+        with open(target, 'w') as _f:
+            yaml.dump(CommentedMap({'services': CommentedMap(), 'networks': CommentedMap()}), _f)
 
     general_comments = {}
-    data = yaml.load(open(target)) or CommentedMap()
+    with open(target) as _f:
+        data = yaml.load(_f) or CommentedMap()
     services = data.setdefault('services', CommentedMap())
     nets_cfg = data.setdefault('networks', CommentedMap())
 
     # Loop through service definitions
     while True:
-        svc = questionary.text('Service name (blank to finish):').ask()
+        svc = ask_or_abort(questionary.text('Service name (blank to finish):').ask())
         if not svc:
             break
 
         cfg = CommentedMap()
         # Container name
-        cfg['container_name'] = questionary.text(
+        cfg['container_name'] = ask_or_abort(questionary.text(
             'Container name (identifier):', default=svc
-        ).ask()
+        ).ask())
 
         # Image
-        img = questionary.text(
+        img = ask_or_abort(questionary.text(
             'Docker image (repo:tag):'
-        ).ask() or ''
+        ).ask()) or ''
         if ':' in img:
             cfg['image'] = img
         else:
-            base = questionary.text('Base repository:', default=img).ask()
-            tag = questionary.text('Tag (e.g. latest):', default='latest').ask()
+            base = ask_or_abort(questionary.text('Base repository:', default=img).ask())
+            tag = ask_or_abort(questionary.text('Tag (e.g. latest):', default='latest').ask())
             cfg['image'] = f"{base}:{tag}"
 
         # Restart policy
-        policy = questionary.select(
+        policy = ask_or_abort(questionary.select(
             'Restart policy:',
             choices=[
                 'unless-stopped – Restart unless stopped manually',
@@ -320,36 +359,36 @@ def add_service(ctx, app_name):
                 'on-failure – Restart on non-zero exit',
                 'no – Do not restart'
             ]
-        ).ask().split()[0]
+        ).ask()).split()[0]
         cfg['restart'] = policy
 
         # Dependencies
         if services:
-            deps = questionary.checkbox(
+            deps = ask_or_abort(questionary.checkbox(
                 'Depends on (select other services):', choices=list(services.keys())
-            ).ask() or []
+            ).ask()) or []
             if deps:
                 cfg['depends_on'] = CommentedSeq(deps)
 
         # Optional comments split by comma
-        notes = questionary.text(
+        notes = ask_or_abort(questionary.text(
             'Optional notes/comments (comma-separated):'
-        ).ask() or ''
+        ).ask()) or ''
         if notes:
             general_comments[svc] = notes
 
         # Ports
-        ports = questionary.text(
+        ports = ask_or_abort(questionary.text(
             'Port mappings (host:container, comma-separated):'
-        ).ask() or ''
+        ).ask()) or ''
         ps = [p.strip() for p in ports.split(',') if p.strip()]
         if ps:
-            cfg['ports'] = CommentedSeq(ps)
+            cfg['ports'] = quote_ports(ps)
 
         # Volumes
-        vols = questionary.text(
+        vols = ask_or_abort(questionary.text(
             'Volume bindings (host:container, comma-separated):'
-        ).ask() or ''
+        ).ask()) or ''
         vs = [v.strip() for v in vols.split(',') if v.strip()]
         if vs:
             cfg['volumes'] = CommentedSeq(vs)
@@ -361,51 +400,51 @@ def add_service(ctx, app_name):
 
         # Environment variables
         envs = []
-        if questionary.confirm('Include default env vars (PUID, PGID, TZ)?').ask():
+        if ask_or_abort(questionary.confirm('Include default env vars (PUID, PGID, TZ)?').ask()):
             envs.extend(['PUID=1000', 'PGID=1000', 'TZ=Europe/Berlin'])
-        extra_env = questionary.text(
+        extra_env = ask_or_abort(questionary.text(
             'Additional env vars (KEY=VALUE, comma-separated):'
-        ).ask() or ''
+        ).ask()) or ''
         for e in [e.strip() for e in extra_env.split(',') if e.strip()]:
             envs.append(e)
         if envs:
             cfg['environment'] = CommentedSeq(envs)
 
         # Networks - existing
-        attach = questionary.checkbox(
+        attach = ask_or_abort(questionary.checkbox(
             'Attach to existing networks:',
             choices=[f"(E) {n}" if n in infra_nets else n for n in sorted(set(infra_nets + list(nets_cfg.keys())))]
-        ).ask() or []
+        ).ask()) or []
         attach = [a.replace('(E) ', '') for a in attach]
         for net in attach:
             props = {'name': net}
             if net in infra_nets:
-                # external networks must not have a `type:` field
+                # external networks must not have a `driver:` field
                 props['external'] = True
             else:
-                props['type'] = 'bridge'
+                props['driver'] = 'bridge'
             nets_cfg[net] = CommentedMap(props)
             cfg.setdefault('networks', CommentedSeq()).append(net)
 
         # Networks - new
-        new_nets = questionary.text(
+        new_nets = ask_or_abort(questionary.text(
             'New networks to create (names, comma-separated):'
-        ).ask() or ''
+        ).ask()) or ''
         for nn in [n.strip() for n in new_nets.split(',') if n.strip()]:
-            kind = questionary.select(
+            kind = ask_or_abort(questionary.select(
                 f"Type for network '{nn}':",
                 choices=[
-                    'external – external bridge network',
-                    'internal – isolated internal network',
-                    'internet – IPv6-enabled bridged network'
+                    'external – shared bridge network (external)',
+                    'internal – isolated bridge network (no internet)',
+                    'internet – bridge network with IPv6'
                 ]
-            ).ask().split()[0]
+            ).ask()).split()[0]
             props = {'name': nn}
             if kind == 'external':
-                # external networks must not have a `type:` field
+                # external networks must not have a `driver:` field
                 props['external'] = True
             else:
-                props['type'] = 'bridge'
+                props['driver'] = 'bridge'
                 if kind == 'internal':
                     props['internal'] = True
                 else:
@@ -417,11 +456,11 @@ def add_service(ctx, app_name):
         # Resource presets
         choices = [f"{n} – {c} CPUs, {m} memory" for n,(c,m) in ctx.obj['presets'].items()]
         choices += ['Custom – enter CPUs & memory', 'None – no limits']
-        sel = questionary.select('Resource preset:', choices=choices).ask()
+        sel = ask_or_abort(questionary.select('Resource preset:', choices=choices).ask())
         if not sel.startswith('None'):
             if sel.startswith('Custom'):
-                ccpus = questionary.text('Custom CPU count:').ask()
-                cmem = questionary.text('Custom memory limit:').ask()
+                ccpus = ask_or_abort(questionary.text('Custom CPU count:').ask())
+                cmem = ask_or_abort(questionary.text('Custom memory limit:').ask())
             else:
                 pname = sel.split(' – ')[0]
                 ccpus, cmem = ctx.obj['presets'][pname]
@@ -434,11 +473,33 @@ def add_service(ctx, app_name):
             ])
 
         # Watchtower auto-update label
-        if questionary.confirm('Enable Watchtower auto-updates?').ask():
+        if ask_or_abort(questionary.confirm('Enable Watchtower auto-updates?').ask()):
             cfg['labels'] = CommentedSeq(['com.centurylinklabs.watchtower.enable=true'])
 
         # Order and store service
         services[svc] = order_service(cfg)
+
+    # Pre-write summary
+    if services:
+        env_console.rule('[bold]Summary[/]')
+        summary = Table(title='Services to write')
+        summary.add_column('Service')
+        summary.add_column('Image')
+        summary.add_column('Ports')
+        summary.add_column('Networks')
+        summary.add_column('Limits')
+        for name, svc_cfg in services.items():
+            img = svc_cfg.get('image', '')
+            ports_str = ', '.join(str(p) for p in svc_cfg.get('ports', [])) or '—'
+            nets_str = ', '.join(str(n) for n in svc_cfg.get('networks', [])) or '—'
+            limits = svc_cfg.get('deploy', {}).get('resources', {}).get('limits', {})
+            lim_str = f"{limits.get('cpus', '—')} CPUs, {limits.get('memory', '—')}" if limits else '—'
+            summary.add_row(name, img, ports_str, nets_str, lim_str)
+        env_console.print(summary)
+
+        if not ask_or_abort(questionary.confirm('Write this compose file?', default=True).ask()):
+            env_console.print('[yellow]Aborted, nothing written.[/]')
+            return
 
     # Sort services and networks
     data['services'] = CommentedMap(sorted(services.items()))
@@ -446,35 +507,87 @@ def add_service(ctx, app_name):
         nets_cfg[net] = order_network(props)
     data['networks'] = CommentedMap(sorted(nets_cfg.items()))
 
+    # Build root, omitting empty networks
+    root_items = [('services', data['services'])]
+    if data['networks']:
+        root_items.append(('networks', data['networks']))
+    root = CommentedMap(root_items)
+
     # Dump YAML and inject comments for each service
-    root = CommentedMap([('services', data['services']), ('networks', data['networks'])])
     buf = StringIO(); yaml.dump(root, buf)
     lines = buf.getvalue().splitlines()
 
     out = []
-    current = None
     for line in lines:
-        out.append(line)
         m = re.match(r"^  (\S[^:]+):$", line)
-        if m:
-            current = m.group(1)
-            if current in general_comments:
-                for note in general_comments[current].split(','):
-                    out.append(f"    # {note.strip()}")
+        if m and m.group(1) in general_comments:
+            for note in general_comments[m.group(1)].split(','):
+                out.append(f"  # {note.strip()}")
+        out.append(line)
     with open(target, 'w') as f:
         f.write("\n".join(out) + "\n")
 
     # Validation step
-    env_console.rule('[bold]Validation[/]')
-    try:
-        subprocess.run(['docker','compose','-f',target,'config'], check=True, capture_output=True, text=True)
-        env_console.print('[green]Compose file is valid![/]')
-    except subprocess.CalledProcessError as e:
-        env_console.print(f"[red]Validation error:[/] {e.stderr}")
-    except FileNotFoundError:
-        env_console.print('[red]docker compose not found on PATH[/]')
-
+    validate_compose(target)
     env_console.print(f"[bold green]Wrote compose to:[/] {target}")
+
+@cli.command('remove')
+@click.argument('app_name')
+@click.pass_context
+def remove_service(ctx, app_name):
+    """
+    Interactively remove a service from <app_name>/compose.yml.
+    """
+    app_dir = os.path.join(os.getcwd(), app_name)
+    target = os.path.join(app_dir, 'compose.yml')
+    if not os.path.exists(target):
+        env_console.print(f"[red]No compose file found in '{app_name}'[/]")
+        return
+
+    with open(target) as _f:
+        data = yaml.load(_f) or CommentedMap()
+
+    services = data.get('services', CommentedMap())
+    if not services:
+        env_console.print('[yellow]No services defined.[/]')
+        return
+
+    svc_names = list(services.keys())
+    to_remove = ask_or_abort(questionary.checkbox(
+        'Select services to remove:', choices=svc_names
+    ).ask())
+
+    if not to_remove:
+        env_console.print('[yellow]Nothing selected.[/]')
+        return
+
+    for name in to_remove:
+        del services[name]
+        env_console.print(f"  Removed [red]{name}[/]")
+
+    data['services'] = services
+
+    # Clean up networks that are no longer referenced by any service
+    nets_cfg = data.get('networks', CommentedMap())
+    used_nets = set()
+    for svc_cfg in services.values():
+        for n in svc_cfg.get('networks', []):
+            used_nets.add(str(n))
+    for net_name in list(nets_cfg.keys()):
+        if net_name not in used_nets:
+            del nets_cfg[net_name]
+
+    # Build root, omitting empty networks
+    root_items = [('services', data['services'])]
+    if nets_cfg:
+        root_items.append(('networks', nets_cfg))
+    root = CommentedMap(root_items)
+
+    with open(target, 'w') as f:
+        yaml.dump(root, f)
+
+    validate_compose(target)
+    env_console.print(f"[bold green]Updated compose at:[/] {target}")
 
 @cli.command('list')
 @click.argument('app_name')
@@ -488,7 +601,8 @@ def list_services(ctx, app_name):
     if not os.path.exists(target):
         env_console.print(f"[red]No compose file found in '{app_name}'[/]")
         return
-    data = yaml.load(open(target)) or {}
+    with open(target) as _f:
+        data = yaml.load(_f) or {}
 
     table = Table(title=f"Services in '{app_name}'")
     cols = ['Name','Image','Ports','Networks','CPUs','Memory','Env','Volumes','Auto-Update']
@@ -496,17 +610,17 @@ def list_services(ctx, app_name):
 
     for name, cfg in data.get('services', {}).items():
         img = cfg.get('image','')
-        ports = ','.join(cfg.get('ports',[])) or '—'
+        ports = ','.join(str(p) for p in cfg.get('ports',[])) or '—'
         nets = cfg.get('networks',[])
         net_display = []
         for n in nets:
-            ext = data['networks'].get(n,{}).get('external')
-            net_display.append(f"(E){n}" if ext else n)
+            ext = data.get('networks',{}).get(str(n),{}).get('external')
+            net_display.append(f"(E){n}" if ext else str(n))
         nets_str = ','.join(net_display) or '—'
         limits = cfg.get('deploy',{}).get('resources',{}).get('limits',{})
         cpus = limits.get('cpus','—'); mem = limits.get('memory','—')
-        envs = ','.join(cfg.get('environment',[])) or '—'
-        vols = ','.join(cfg.get('volumes',[])) or '—'
+        envs = ','.join(str(e) for e in cfg.get('environment',[])) or '—'
+        vols = ','.join(str(v) for v in cfg.get('volumes',[])) or '—'
         auto = 'Yes' if 'com.centurylinklabs.watchtower.enable=true' in cfg.get('labels',[]) else 'No'
         table.add_row(name, img, ports, nets_str, cpus, mem, envs, vols, auto)
 
@@ -529,8 +643,12 @@ def list_services(ctx, app_name):
                 help='Resource preset to apply to all services')
 @click.option('--volume','-v',multiple=True,
                 help='Bind mount these volumes on all services')
+@click.option('--cpus', default=None,
+                help='CPU limit (used with --preset Custom)')
+@click.option('--memory', default=None,
+                help='Memory limit (used with --preset Custom)')
 @click.pass_context
-def build(ctx, app_name, service, restart, network, port, env, preset, volume):
+def build(ctx, app_name, service, restart, network, port, env, preset, volume, cpus, memory):
     """
     Generate a basic compose.yml in script mode under <app_name>.
     Services, ports, networks, envs, volumes, and resource limits are
@@ -551,32 +669,40 @@ def build(ctx, app_name, service, restart, network, port, env, preset, volume):
         cfg = CommentedMap([('container_name',name),('image',img)])
         cfg['restart'] = restart
         if network: cfg['networks'] = CommentedSeq(network)
-        if port:    cfg['ports'] = CommentedSeq(port)
+        if port:    cfg['ports'] = quote_ports(port)
         if env:     cfg['environment'] = CommentedSeq(env)
         if volume:  cfg['volumes'] = CommentedSeq(volume)
-        if preset!='None':
-            if preset=='Custom':
-                cpu = questionary.text('Custom CPUs:').ask()
-                mem = questionary.text('Custom memory:').ask()
+        if preset != 'None':
+            if preset == 'Custom':
+                if not cpus or not memory:
+                    env_console.print('[red]--cpus and --memory are required with --preset Custom[/]')
+                    sys.exit(1)
+                cpu_val, mem_val = cpus, memory
             else:
-                cpu, mem = ctx.obj['presets'].get(preset,('',''))
+                preset_vals = ctx.obj['presets'].get(preset)
+                if not preset_vals:
+                    env_console.print(f"[red]Unknown preset '{preset}'. Available: {', '.join(ctx.obj['presets'])}[/]")
+                    sys.exit(1)
+                cpu_val, mem_val = preset_vals
             cfg['deploy'] = CommentedMap([
                 ('resources',CommentedMap([
                     ('limits',CommentedMap([
-                        ('cpus',cpu),('memory',mem)
+                        ('cpus',cpu_val),('memory',mem_val)
                     ]))
                 ]))
             ])
         data['services'][name] = order_service(cfg)
 
-    # No networks by default in script mode
-    data['networks'] = CommentedMap()
-    # Dump to file
-    with open(target,'w') as f:
-        yaml.dump( CommentedMap([
-            ('services',CommentedMap(sorted(data['services'].items()))),
-            ('networks',data['networks'])
-        ]), f)
+    # Build root, omitting empty networks
+    root_items = [('services', CommentedMap(sorted(data['services'].items())))]
+    if data['networks']:
+        root_items.append(('networks', data['networks']))
+    root = CommentedMap(root_items)
+
+    with open(target, 'w') as f:
+        yaml.dump(root, f)
+
+    validate_compose(target)
     env_console.print(f"[green]Built compose file at:[/] {target}")
 
 @cli.command()
