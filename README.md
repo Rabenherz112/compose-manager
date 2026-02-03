@@ -92,7 +92,7 @@ python3 compose_manager.py list my_app
 
 I created this tool to simplify my personal workflow when working with docker compose. I often found myself copy pasting YAML snippets from the internet (especially when setting up new services) and then having to manually edit them to fit my needs. This often resulted in me forgetting to change things, or having to look up the same information over and over again. I wanted a tool that would allow me to quickly and easily generate docker compose files in the format I want.
 
-Since I thought this might be useful for others as well, I published it. However since this is my personal tool, I will likely neither expand it to support all use cases, nor will I maintain it in the long run. This was first and foremost a tool which I use for myself. If you find it useful, great! If not, feel free to either submit a PR or fork it and make it your own. I will not be offended if you do so. I just ask you to keep the license in mind.
+Since I thought this might be useful for others as well, I published it. However since this is my personal tool, I will likely neither expand it to support all use cases, nor will I maintain it in the long run. This is first and foremost a tool which I use for myself. If you find it useful, great! If not, feel free to either submit a PR or fork it and make it your own. 
 
 ## 📜 License
 
